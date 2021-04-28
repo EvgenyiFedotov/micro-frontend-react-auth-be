@@ -85,40 +85,52 @@ app.get("/api/check-access", async (req, res) => {
 
 app.post("/api/sign-in", async (req, res) => {
   const { hash } = req.fingerprint ?? { hash: "" };
-  const { password }: { password: string } = req.body;
+  const password: string = req.body?.password.trim() ?? "";
+  const user = await hasUser(hash) ? await getUser(hash) : null;
+  let status: number = 200;
 
-  if (hash) {
-    if (await hasUser(hash)) {
-      const user = await getUser(hash);
+  if (!hash || !password) {
+    status = 400;
+  } else if (!user) {
+    const salt = await bcrypt.genSalt(SALT_ROUNDS);
+    const token = await bcrypt.genSalt(SALT_ROUNDS);
 
-      if (await bcrypt.compare(password, user.password)) {
-        const token = await bcrypt.genSalt(SALT_ROUNDS);
-
-        updateUser(hash, {
-          nonce: { token, created: new Date().getTime() },
-        });
-        res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
-        res.status(200);
-      } else {
-        await clearNonceToken(res, hash);
-        res.statusMessage = "Credential is incorrect";
-        res.status(401);
-      }
-    } else {
-      const salt = await bcrypt.genSalt(SALT_ROUNDS);
-      const token = await bcrypt.genSalt(SALT_ROUNDS);
-
-      setUser(hash, {
-        password: await bcrypt.hash(password, salt),
-        nonce: { token, created: new Date().getTime() },
-      });
-      res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
-      res.status(200);
-    }
+    setUser(hash, {
+      password: await bcrypt.hash(password, salt),
+      nonce: { token, created: new Date().getTime() },
+    });
+    res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
+  } else if (!await bcrypt.compare(password, user.password)) {
+    await clearNonceToken(res, hash);
+    res.statusMessage = "Credential is incorrect";
+    status = 400;
   } else {
-    res.status(400);
+    const token = await bcrypt.genSalt(SALT_ROUNDS);
+
+    updateUser(hash, {
+      nonce: { token, created: new Date().getTime() },
+    });
+    res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
   }
 
+  res.status(status);
+  res.end();
+});
+
+app.post("/api/sign-out", async (req, res) => {
+  const { hash } = req.fingerprint ?? { hash: "" };
+  const user = await hasUser(hash) ? await getUser(hash) : null;
+  let status: number = 200;
+
+  if (!hash || !user) {
+    status = 400;
+  } else if (!user.nonce) {
+    status = 401;
+  } else {
+    clearNonceToken(res, hash);
+  }
+
+  res.status(status);
   res.end();
 });
 
