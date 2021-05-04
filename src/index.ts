@@ -6,7 +6,7 @@ import * as FingerprintParams from "express-fingerprint/lib/parameters";
 import requestIp from "request-ip";
 import cookieParser from "cookie-parser";
 
-import { getUser, hasUser, setNonceToLink, setUser, updateUser } from "./users";
+import { getUser, hasUser, setUser, updateUser } from "./users";
 
 const SALT_ROUNDS = 10;
 const NONCE_TOKEN_BORDER = 1000 * 60 * 2;
@@ -122,7 +122,6 @@ app.post("/api/sign-in", async (req, res) => {
       cid: req.cookies.cid,
       password: await bcrypt.hash(password, salt),
       nonce: { token, created: new Date().getTime() },
-      nonceToLinkId: null,
     });
     res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
   } else if (status === 200 && user) {
@@ -145,51 +144,6 @@ app.post("/api/sign-out", async (req, res) => {
 
   if (status === 200) {
     await clearNonceToken(req, res);
-  }
-
-  res.status(status);
-  res.end();
-});
-
-app.get("/api/link/:nonceToLinkId", async (req, res) => {
-  const { nonceToLinkId } = req.params;
-  let status: number = await getStatusByAccess(req);
-
-  if (!nonceToLinkId) {
-    status = 400;
-  }
-
-  if (status === 401) {
-    await clearNonceToken(req, res);
-  } else if (status === 200) {
-    updateUser(await getHash(req), { nonceToLinkId: null });
-  }
-
-  res.status(status);
-  res.end();
-});
-
-app.get("/api/nonce-to-link", async (req, res) => {
-  const { hash } = req.fingerprint ?? { hash: "" };
-  const user = await hasUser(hash) ? await getUser(hash) : null;
-  let status: number = 200;
-
-  if (!hash || !user) {
-    status = 400;
-  } else if (!user.nonce) {
-    status = 401;
-  }
-
-  if (status === 401) {
-    await clearNonceToken(req, res);
-  } else if (status === 200) {
-    const nonceToLinkId = await bcrypt.genSalt(SALT_ROUNDS);
-
-    setNonceToLink(nonceToLinkId, {
-      token: await bcrypt.genSalt(SALT_ROUNDS),
-      created: new Date().getTime(),
-    });
-    updateUser(hash, { nonceToLinkId });
   }
 
   res.status(status);
