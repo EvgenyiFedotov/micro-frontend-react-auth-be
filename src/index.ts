@@ -6,7 +6,7 @@ import * as FingerprintParams from "express-fingerprint/lib/parameters";
 import requestIp from "request-ip";
 import cookieParser from "cookie-parser";
 
-import { getUser, hasUser, setUser, updateUser } from "./users";
+import { getUser, hasUser, setNonceToLink, setUser, updateUser } from "./users";
 
 const SALT_ROUNDS = 10;
 const NONCE_TOKEN_BORDER = 1000 * 60 * 2;
@@ -40,19 +40,28 @@ app.use(Fingerprint({
   ],
 }));
 
-const clearNonceToken = async (res: express.Response, hash: string) => {
-  res.clearCookie(COOKIE_NONCE_TOKEN_KEY);
-  try {
+const getHash =  async (req: express.Request) => {
+  return req.fingerprint?.hash ?? "";
+};
+
+const clearNonceToken = async (req: express.Request, res: express.Response) => {
+  const hash = await getHash(req);
+
+  if (await hasUser(hash)) {
+    res.clearCookie(COOKIE_NONCE_TOKEN_KEY);
     await updateUser(hash, { nonce: null });
-  } catch (error) {
-    // pass
   }
 };
 
-const checkAccess = async (req: express.Request, res: express.Response) => {
-  const { hash } = req.fingerprint ?? { hash: "" };
+const getUserByReq = async (req: express.Request) => {
+  const hash = await getHash(req);
+  return await hasUser(hash) ? await getUser(hash) : null;
+};
+
+const checkAccess = async (req: express.Request) => {
+  const hash = await getHash(req);
+  const user = await getUserByReq(req);
   const nonceToken = req.cookies.nonceToken;
-  const user = await hasUser(hash) ? await getUser(hash) : null;
   let error: null | string = null;
 
   if (!hash) {
@@ -67,50 +76,64 @@ const checkAccess = async (req: express.Request, res: express.Response) => {
     error = "Nonce is old";
   }
 
-  if (error) {
-    await clearNonceToken(res, hash);
-    throw new Error(error);
+  return error;
+};
+
+const getStatusByAccess = async (req: express.Request) => {
+  let status: number = 200;
+
+  if (await checkAccess(req)) {
+    status = 401;
+  } else if (!await getHash(req) || !await getUserByReq(req)) {
+    status = 400;
   }
+
+  return status;
 };
 
 app.get("/api/check-access", async (req, res) => {
-  try {
-    await checkAccess(req, res);
-    res.status(200);
-  } catch (error) {
-    res.status(401);
+  const status = await getStatusByAccess(req);
+
+  if (status === 401) {
+    await clearNonceToken(req, res);
   }
+
+  res.status(status);
   res.end();
 });
 
 app.post("/api/sign-in", async (req, res) => {
-  const { hash } = req.fingerprint ?? { hash: "" };
   const password: string = req.body?.password.trim() ?? "";
-  const user = await hasUser(hash) ? await getUser(hash) : null;
+  const hash = await getHash(req);
+  const user = await getUserByReq(req);
   let status: number = 200;
 
   if (!hash || !password) {
     status = 400;
-  } else if (!user) {
+  } else if (user && !await bcrypt.compare(password, user.password)) {
+    status = 401;
+  }
+
+  if (status === 200 && !user) {
     const salt = await bcrypt.genSalt(SALT_ROUNDS);
     const token = await bcrypt.genSalt(SALT_ROUNDS);
 
     setUser(hash, {
+      cid: req.cookies.cid,
       password: await bcrypt.hash(password, salt),
       nonce: { token, created: new Date().getTime() },
+      nonceToLinkId: null,
     });
     res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
-  } else if (!await bcrypt.compare(password, user.password)) {
-    await clearNonceToken(res, hash);
-    res.statusMessage = "Credential is incorrect";
-    status = 400;
-  } else {
+  } else if (status === 200 && user) {
     const token = await bcrypt.genSalt(SALT_ROUNDS);
 
     updateUser(hash, {
       nonce: { token, created: new Date().getTime() },
     });
     res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
+  } else if (status === 401) {
+    await clearNonceToken(req, res);
   }
 
   res.status(status);
@@ -118,6 +141,35 @@ app.post("/api/sign-in", async (req, res) => {
 });
 
 app.post("/api/sign-out", async (req, res) => {
+  let status: number = await getStatusByAccess(req);
+
+  if (status === 200) {
+    await clearNonceToken(req, res);
+  }
+
+  res.status(status);
+  res.end();
+});
+
+app.get("/api/link/:nonceToLinkId", async (req, res) => {
+  const { nonceToLinkId } = req.params;
+  let status: number = await getStatusByAccess(req);
+
+  if (!nonceToLinkId) {
+    status = 400;
+  }
+
+  if (status === 401) {
+    await clearNonceToken(req, res);
+  } else if (status === 200) {
+    updateUser(await getHash(req), { nonceToLinkId: null });
+  }
+
+  res.status(status);
+  res.end();
+});
+
+app.get("/api/nonce-to-link", async (req, res) => {
   const { hash } = req.fingerprint ?? { hash: "" };
   const user = await hasUser(hash) ? await getUser(hash) : null;
   let status: number = 200;
@@ -126,8 +178,18 @@ app.post("/api/sign-out", async (req, res) => {
     status = 400;
   } else if (!user.nonce) {
     status = 401;
-  } else {
-    clearNonceToken(res, hash);
+  }
+
+  if (status === 401) {
+    await clearNonceToken(req, res);
+  } else if (status === 200) {
+    const nonceToLinkId = await bcrypt.genSalt(SALT_ROUNDS);
+
+    setNonceToLink(nonceToLinkId, {
+      token: await bcrypt.genSalt(SALT_ROUNDS),
+      created: new Date().getTime(),
+    });
+    updateUser(hash, { nonceToLinkId });
   }
 
   res.status(status);
