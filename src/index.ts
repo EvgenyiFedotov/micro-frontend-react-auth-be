@@ -5,8 +5,9 @@ import Fingerprint from 'express-fingerprint';
 import * as FingerprintParams from "express-fingerprint/lib/parameters";
 import requestIp from "request-ip";
 import cookieParser from "cookie-parser";
+import { v4 as uuid } from "uuid";
 
-import { getUser, hasUser, setUser, updateUser } from "./users";
+import { findUserByLinkTokenShort, getUser, hasUser, setUser, updateUser } from "./users";
 
 const SALT_ROUNDS = 10;
 const NONCE_TOKEN_BORDER = 1000 * 60 * 2;
@@ -31,7 +32,7 @@ app.use(Fingerprint({
       let cid = req.cookies.cid;
 
       if (!req.cookies.cid) {
-        const cid = await bcrypt.genSalt(SALT_ROUNDS);
+        cid = uuid();
         res.cookie('cid', cid);
       }
 
@@ -49,7 +50,7 @@ const clearNonceToken = async (req: express.Request, res: express.Response) => {
 
   if (await hasUser(hash)) {
     res.clearCookie(COOKIE_NONCE_TOKEN_KEY);
-    await updateUser(hash, { nonce: null });
+    await updateUser(hash, { nonceToken: null, nonceCreated: null });
   }
 };
 
@@ -68,11 +69,11 @@ const checkAccess = async (req: express.Request) => {
     error = "Hash doesn't exist";
   } else if (!Boolean(nonceToken)) {
     error = "Nonce token doesn't exist";
-  } else if (!Boolean(user) || !user?.nonce?.token) {
+  } else if (!Boolean(user) || !user?.nonceToken) {
     error = "User doesn't exist";
-  } else if (nonceToken !== user?.nonce?.token) {
+  } else if (nonceToken !== user?.nonceToken) {
     error = "Nonce is incorrect";
-  } else if (new Date().getTime() > user.nonce.created + NONCE_TOKEN_BORDER) {
+  } else if (new Date().getTime() > (user.nonceCreated ?? 0) + NONCE_TOKEN_BORDER) {
     error = "Nonce is old";
   }
 
@@ -115,22 +116,27 @@ app.post("/api/sign-in", async (req, res) => {
   }
 
   if (status === 200 && !user) {
-    const salt = await bcrypt.genSalt(SALT_ROUNDS);
-    const token = await bcrypt.genSalt(SALT_ROUNDS);
+    const nonceToken = await bcrypt.genSalt(SALT_ROUNDS);
 
     setUser(hash, {
       cid: req.cookies.cid,
-      password: await bcrypt.hash(password, salt),
-      nonce: { token, created: new Date().getTime() },
+      password: await bcrypt.hash(password, await bcrypt.genSalt(SALT_ROUNDS)),
+      nonceToken,
+      nonceCreated: new Date().getTime(),
+      linkToken: null,
+      linkTokenShort: null,
+      linkCreated: null,
+      linkedUsers: [],
     });
-    res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
+    res.cookie(COOKIE_NONCE_TOKEN_KEY, nonceToken);
   } else if (status === 200 && user) {
-    const token = await bcrypt.genSalt(SALT_ROUNDS);
+    const nonceToken = await bcrypt.genSalt(SALT_ROUNDS);
 
     updateUser(hash, {
-      nonce: { token, created: new Date().getTime() },
+      nonceToken,
+      nonceCreated: new Date().getTime(),
     });
-    res.cookie(COOKIE_NONCE_TOKEN_KEY, token);
+    res.cookie(COOKIE_NONCE_TOKEN_KEY, nonceToken);
   } else if (status === 401) {
     await clearNonceToken(req, res);
   }
@@ -140,10 +146,58 @@ app.post("/api/sign-in", async (req, res) => {
 });
 
 app.post("/api/sign-out", async (req, res) => {
-  let status: number = await getStatusByAccess(req);
+  let status = await getStatusByAccess(req);
 
   if (status === 200) {
     await clearNonceToken(req, res);
+  }
+
+  res.status(status);
+  res.end();
+});
+
+app.post("/api/link/token", async (req, res) => {
+  const password: string = req.body?.password.trim() ?? "";
+  let status = await getStatusByAccess(req);
+
+  if (!password) {
+    status = 400;
+  }
+
+  if (status === 200) {
+    const salt = await bcrypt.genSalt(SALT_ROUNDS);
+    const linkToken = await bcrypt.hash(password, salt);
+    const linkTokenShort = linkToken.slice(-6);
+    const linkCreated = new Date().getTime();
+
+    updateUser(await getHash(req), { linkToken, linkTokenShort, linkCreated });
+    res.send(linkTokenShort);
+  }
+
+  res.status(status);
+  res.end();
+});
+
+app.post("/api/link", async (req, res) => {
+  const linkTokenShort: string = req.body?.linkTokenShort.trim() ?? "";
+  const password: string = req.body?.password.trim() ?? "";
+  const parentUser = await findUserByLinkTokenShort(linkTokenShort);
+  const user = await getUserByReq(req);
+  let status = await getStatusByAccess(req);
+
+  if (!linkTokenShort || !parentUser || parentUser.cid === user?.cid || linkTokenShort === parentUser.linkTokenShort) {
+    status = 400;
+  } else if (!await bcrypt.compare(password, parentUser?.linkToken ?? "")) {
+    status = 401;
+  }
+
+  if (status === 200 && user) {
+    updateUser(await getHash(req), {
+      linkToken: null,
+      linkTokenShort: null,
+      linkCreated: null,
+      linkedUsers: [...user.linkedUsers, { cid: parentUser?.cid ?? "" }],
+    });
   }
 
   res.status(status);

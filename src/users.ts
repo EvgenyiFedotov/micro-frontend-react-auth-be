@@ -1,14 +1,14 @@
 type UserId = string;
 
-type Nonce = {
-  token: string;
-  created: number;
-};
-
 type User = {
   cid: string;
   password: string;
-  nonce: Nonce | null;
+  nonceToken: string | null;
+  nonceCreated: number | null;
+  linkToken: string | null;
+  linkTokenShort: string | null;
+  linkCreated: number | null;
+  linkedUsers: { cid: string }[];
 };
 
 const users: Map<UserId, User> = new Map();
@@ -33,4 +33,8 @@ export const updateUser = async (id: UserId, data: Partial<User>): Promise<void>
   } catch (error) {
     throw error;
   }
+};
+
+export const findUserByLinkTokenShort = async (linkTokenShort: string): Promise<User | null> => {
+  return Array.from(users.values()).filter((user) => user.linkTokenShort === linkTokenShort)[0] || null;
 };
